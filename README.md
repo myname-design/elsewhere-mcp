@@ -57,7 +57,7 @@ An MCP server that lets an AI look at the world: public webcams everywhere, wher
 
 ## 安装 / Setup
 
-需要 Python 3.10+。
+需要 Python 3.10+（Render 使用 Python 3.12）。远程部署见 [部署说明](DEPLOYMENT.md)。
 
 ```bash
 python3 -m venv venv
@@ -67,9 +67,9 @@ set -a; . ./.env; set +a
 venv/bin/python server.py
 ```
 
-服务跑在 `http://127.0.0.1:8787/mcp`（streamable HTTP）。要给远程客户端用，放在 nginx 之类的反向代理后面，并加上 HTTPS。
+服务默认监听 `0.0.0.0:8787`，本机访问 `http://127.0.0.1:8787/mcp`（streamable HTTP）。要给远程客户端用，放在 nginx 之类的反向代理后面，并加上 HTTPS。
 
-注意：FastMCP 只接受本机 Host 头，反向代理要加 `proxy_set_header Host 127.0.0.1:8787;` 和 `proxy_set_header Origin "";`，否则会返回 421。
+远程 HTTP 默认强制 OAuth，启动前请按 [Render 与 ChatGPT 部署说明](DEPLOYMENT.md) 配置认证。保留真实 Host 头；只允许配置的服务域名和 Origin，不要清除 Origin 绕过校验。
 
 ### 接到 Claude 上 / Connect to Claude
 
@@ -146,3 +146,4 @@ claude mcp add elsewhere -e TRANSPORT=stdio -e WINDY_API_KEY=你的key -- /你�
 ## License
 
 MIT
+

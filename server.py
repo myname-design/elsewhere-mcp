@@ -7,6 +7,8 @@ import datetime as dt
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
+from starlette.responses import JSONResponse
+from security import remote_security
 
 API_KEY = os.environ["WINDY_API_KEY"]
 BASE = "https://api.windy.com/webcams/api/v3"
@@ -14,11 +16,22 @@ INCLUDE = "location,images,player,urls,categories"
 GH_TOKEN = os.getenv("GH_TOKEN")
 GH_REPO = os.getenv("GH_REPO")  # 公开仓库，如 yourname/your-snaps，show 工具用
 
+TRANSPORT = os.getenv("TRANSPORT", "streamable-http")
+if TRANSPORT not in {"stdio", "streamable-http"}:
+    raise ValueError("TRANSPORT must be stdio or streamable-http")
+
 mcp = FastMCP(
     "webcam",
-    host=os.getenv("HOST", "127.0.0.1"),
+    host=os.getenv("HOST", "0.0.0.0"),
     port=int(os.getenv("PORT", "8787")),
+    stateless_http=True,
+    **(remote_security() if TRANSPORT != "stdio" else {}),
 )
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request):
+    return JSONResponse({"status": "ok"})
 
 
 async def _get(path, params=None):
@@ -451,4 +464,5 @@ async def weather_at(lat: float, lon: float) -> dict:
 
 if __name__ == "__main__":
     # 默认跑成网络服务；Claude Desktop 这类本地客户端用 TRANSPORT=stdio
-    mcp.run(transport=os.getenv("TRANSPORT", "streamable-http"))
+    mcp.run(transport=TRANSPORT)
+
