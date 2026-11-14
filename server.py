@@ -7,8 +7,10 @@ import datetime as dt
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse
 from security import remote_security, register_discovery_alias
+from diagnostics import MCPDiagnosticsMiddleware, deployment_revision
 
 API_KEY = os.environ["WINDY_API_KEY"]
 BASE = "https://api.windy.com/webcams/api/v3"
@@ -34,7 +36,22 @@ register_discovery_alias(mcp)
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request):
-    return JSONResponse({"status": "ok"})
+    body = {"status": "ok"}
+    if revision := deployment_revision():
+        body["revision"] = revision
+    return JSONResponse(body)
+
+
+def authenticated_tool(*, writes=False):
+    """Advertise the same OAuth policy that HTTP middleware enforces."""
+    return mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=not writes, destructiveHint=False, openWorldHint=True,
+            idempotentHint=not writes,
+        ),
+        meta=({"securitySchemes": [{"type": "oauth2", "scopes": ["mcp:tools"]}]}
+              if TRANSPORT == "streamable-http" else None),
+    )
 
 
 async def _get(path, params=None):
@@ -77,7 +94,7 @@ async def _snapshot_bytes(webcam_id):
     return info, r.content
 
 
-@mcp.tool()
+@authenticated_tool()
 async def search_nearby(lat: float, lon: float, radius_km: int = 50,
                         category: str | None = None, limit: int = 10) -> list[dict]:
     """按经纬度搜索附近的实时摄像头。radius_km 最大 250。
@@ -90,7 +107,7 @@ async def search_nearby(lat: float, lon: float, radius_km: int = 50,
     return [_slim(w) for w in data.get("webcams", [])]
 
 
-@mcp.tool()
+@authenticated_tool()
 async def search_by_country(country: str, category: str | None = None,
                             limit: int = 10, offset: int = 0) -> list[dict]:
     """按国家搜索摄像头。country 用两位国家代码，如 CN, JP, IS（冰岛）, NO, AU, NZ。"""
@@ -102,28 +119,28 @@ async def search_by_country(country: str, category: str | None = None,
     return [_slim(w) for w in data.get("webcams", [])]
 
 
-@mcp.tool()
+@authenticated_tool()
 async def list_categories() -> list[dict]:
     """列出所有摄像头类别。"""
     data = await _get("/categories")
     return data if isinstance(data, list) else data.get("categories", data)
 
 
-@mcp.tool()
+@authenticated_tool()
 async def get_webcam(webcam_id: str) -> dict:
     """查看某个摄像头的详细信息、最新截图和直播播放器链接。"""
     data = await _get(f"/webcams/{webcam_id}", {"include": INCLUDE})
     return _slim(data)
 
 
-@mcp.tool()
+@authenticated_tool()
 async def look(webcam_id: str) -> Image:
     """直接看一眼某个摄像头此刻的画面（返回图片本身，只有 Claude 自己能看见）。"""
     _, data = await _snapshot_bytes(webcam_id)
     return Image(data=data, format="jpeg")
 
 
-@mcp.tool()
+@authenticated_tool(writes=True)
 async def show(webcam_id: str) -> dict:
     """把某个摄像头此刻的画面给用户看。返回 image_url（cdn.jsdelivr.net 链接）和一段 html，
     能渲染 html 的客户端直接放进去就能显示图片。想让用户看到画面时用这个，不要用 look。"""
@@ -167,7 +184,7 @@ def _sun_points(event, now):
     return pts
 
 
-@mcp.tool()
+@authenticated_tool()
 async def where_sun_is(event: str = "sunrise", limit: int = 5) -> list[dict]:
     """找世界上此刻正在日出（sunrise）或日落（sunset）的地方的摄像头。"""
     now = dt.datetime.now(dt.timezone.utc)
@@ -301,7 +318,7 @@ async def _mb_points(study_id, individual_id, days):
     return pts
 
 
-@mcp.tool()
+@authenticated_tool()
 async def list_studies(days: int = 30, taxon: str | None = None,
                        limit: int = 30) -> list[dict]:
     """Movebank：列出你的账号能下载、且最近 N 天还有新定位的动物追踪研究。
@@ -333,7 +350,7 @@ async def list_studies(days: int = 30, taxon: str | None = None,
     return out[:limit]
 
 
-@mcp.tool()
+@authenticated_tool()
 async def list_animals(study_id: str, limit: int = 50) -> list[dict]:
     """Movebank：某个研究里的动物个体（名字、物种、性别、最后记录时间）。"""
     rows = await _mb_get({"entity_type": "individual",
@@ -360,7 +377,7 @@ async def _animal_info(study_id, individual_id):
     return {}
 
 
-@mcp.tool()
+@authenticated_tool()
 async def animal_track(study_id: str, individual_id: str,
                        days: int = 30) -> dict:
     """Movebank：某只动物最近 N 天的定位点（按时间排序，最多 500 个，多了均匀抽样）。"""
@@ -380,7 +397,7 @@ async def animal_track(study_id: str, individual_id: str,
     }
 
 
-@mcp.tool()
+@authenticated_tool()
 async def animal_latest(study_id: str, individual_id: str) -> dict:
     """Movebank：某只动物最新一次定位（最近 60 天内）。"""
     pts = await _mb_points(study_id, individual_id, 60)
@@ -422,7 +439,7 @@ def _wind_dir(deg):
     return _DIRS[int((deg % 360) / 22.5 + 0.5) % 16]
 
 
-@mcp.tool()
+@authenticated_tool()
 async def weather_at(lat: float, lon: float) -> dict:
     """某个经纬度此刻的天气：温度、体感、风速风向、云量、降水，和当地时间。
     数据来自 Open-Meteo，10 分钟内同一地点不重复请求。"""
@@ -473,7 +490,9 @@ def create_http_app():
     """
     if TRANSPORT != "streamable-http":
         raise RuntimeError("HTTP entrypoint requires TRANSPORT=streamable-http")
-    return mcp.streamable_http_app()
+    app = mcp.streamable_http_app()
+    app.add_middleware(MCPDiagnosticsMiddleware)
+    return app
 
 
 def main():

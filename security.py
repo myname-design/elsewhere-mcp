@@ -10,6 +10,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import ProtectedResourceMetadata
 from starlette.responses import Response
+from diagnostics import auth_result
 
 
 def https_url(name):
@@ -33,6 +34,7 @@ class JWTVerifier:
         self.keys = jwt.PyJWKClient(jwks_url, timeout=5, lifespan=300)
 
     async def verify_token(self, token):
+        auth_result.set("invalid_token")
         try:
             key = await asyncio.to_thread(self.keys.get_signing_key_from_jwt, token)
             claims = jwt.decode(
@@ -40,18 +42,41 @@ class JWTVerifier:
                 issuer=self.issuer, options={"require": ["exp", "iat", "sub", "iss", "aud"]},
             )
             if claims["sub"] not in self.subjects:
+                auth_result.set("subject_not_allowed")
                 return None
             scope = claims.get("scope", "")
             if not isinstance(scope, str):
+                auth_result.set("invalid_scope_claim")
                 return None
-            return AccessToken(
+            result = AccessToken(
                 token=token, client_id=claims.get("client_id") or claims.get("azp") or claims["sub"],
                 subject=claims["sub"], scopes=scope.split(),
                 # Map the configured, verified audience to this MCP resource.
                 expires_at=int(claims["exp"]), resource=self.resource,
             )
+            auth_result.set("verified" if "mcp:tools" in result.scopes else "insufficient_scope")
+            return result
+        except jwt.ExpiredSignatureError:
+            auth_result.set("expired_token")
+        except jwt.ImmatureSignatureError:
+            auth_result.set("token_not_yet_valid")
+        except jwt.InvalidIssuerError:
+            auth_result.set("issuer_mismatch")
+        except jwt.InvalidAudienceError:
+            auth_result.set("audience_mismatch")
+        except jwt.MissingRequiredClaimError:
+            auth_result.set("missing_required_claim")
+        except jwt.InvalidSignatureError:
+            auth_result.set("invalid_signature")
+        except jwt.InvalidAlgorithmError:
+            auth_result.set("invalid_algorithm")
+        except jwt.PyJWKClientConnectionError:
+            auth_result.set("jwks_unavailable")
+        except jwt.PyJWKClientError:
+            auth_result.set("signing_key_unavailable")
         except (jwt.PyJWTError, ValueError, TypeError, OSError):
-            return None
+            auth_result.set("invalid_token")
+        return None
 
 
 def remote_security():
