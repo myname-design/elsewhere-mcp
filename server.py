@@ -24,6 +24,7 @@ mcp = FastMCP(
     "webcam",
     host=os.getenv("HOST", "0.0.0.0"),
     port=int(os.getenv("PORT", "8787")),
+    streamable_http_path="/mcp",
     stateless_http=True,
     **(remote_security() if TRANSPORT != "stdio" else {}),
 )
@@ -464,7 +465,31 @@ async def weather_at(lat: float, lon: float) -> dict:
     }
 
 
+def create_http_app():
+    """Build the complete root ASGI router after all routes/tools are registered.
+
+    Mounting this application under /mcp would incorrectly move health/discovery
+    routes and make the MCP endpoint /mcp/mcp.
+    """
+    if TRANSPORT != "streamable-http":
+        raise RuntimeError("HTTP entrypoint requires TRANSPORT=streamable-http")
+    return mcp.streamable_http_app()
+
+
+def main():
+    # 本地 stdio 不启动 HTTP；网络服务与 asgi:app 使用相同的完整路由工厂。
+    if TRANSPORT == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+        uvicorn.run(
+            create_http_app(),
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+
+
 if __name__ == "__main__":
-    # 默认跑成网络服务；Claude Desktop 这类本地客户端用 TRANSPORT=stdio
-    mcp.run(transport=TRANSPORT)
+    main()
 
