@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: elsewhere-mcp
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.12
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRANSPORT
+        value: streamable-http
+      - key: WINDY_API_KEY
+        sync: false
+      - key: MCP_RESOURCE_URL
+        sync: false
+      - key: OAUTH_ISSUER_URL
+        sync: false
+      - key: OAUTH_JWKS_URL
+        sync: false
+      - key: OAUTH_ALLOWED_SUBJECTS
+        sync: false
