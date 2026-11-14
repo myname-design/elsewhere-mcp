@@ -1,4 +1,56 @@
-# Render 与 ChatGPT
+# Scalekit、Render 与 ChatGPT
+
+## Scalekit 配置
+
+本项目继续使用 MCP Python SDK 和 PyJWT，通过 Scalekit 的公开 JWKS 本地验证令牌。
+无需安装另一套 FastMCP 框架，也无需在 MCP 服务器保存 Scalekit API client secret。
+现有 12 个摄像头、天气和动物追踪工具保持原样。
+
+在 Scalekit Dashboard > MCP Servers 创建或选择对应的 MCP server：
+
+1. 将 Server URL 设置为完整的 https://your-service.onrender.com/mcp，和 MCP_RESOURCE_URL 一致。
+2. 在该 MCP server 配置中添加 mcp:tools scope；不要改为其他名称或取消服务器校验。
+3. 根据 ChatGPT 连接方式开启 CIMD 或 DCR，确认资源专属授权服务器元数据公布相应能力。
+   使用自动注册时不要填写 Scalekit 的管理 API Client ID/secret。
+   使用预注册客户端时，凭据和准确回调 URL 必须来自同一 MCP server 的客户端配置。
+4. 配置用户登录方式，并取得自己登录后的稳定 sub。它必须加入 OAUTH_ALLOWED_SUBJECTS；
+   能在 Scalekit 登录并不代表有权限使用本服务器。不要用 email、res_... 或 OAuth Client ID 代替 sub。
+   如需检查令牌声明，在本地安全地检查；不要将真实 access/refresh token 发到在线解码器或日志。
+5. 对旧工作区，如 Dashboard 显示 Resource bound issuer，先按官方迁移指南启用；
+   然后断开并重新授权 ChatGPT，丢弃旧 issuer 的令牌。本项目只信任明确配置的单个 issuer，
+   不自动接受旧环境级 issuer，也不提供免认证迁移窗口。
+
+假设环境 URL 是 https://your-environment.scalekit.com，Resource ID 是 res_your_resource_id：
+
+| 项目 | 配置 / 含义 |
+| --- | --- |
+| OAUTH_ISSUER_URL | https://your-environment.scalekit.com/resources/res_your_resource_id；精确匹配 iss，不额外加尾部斜杠 |
+| OAUTH_AUDIENCE | res_your_resource_id；来自 MCP server 的 Resource ID，不是 Client ID |
+| OAUTH_JWKS_URL | https://your-environment.scalekit.com/keys；以该资源发现文档中的 jwks_uri 为准 |
+| MCP_RESOURCE_URL | https://your-service.onrender.com/mcp；对外资源标识，不与 res_... 混用 |
+| OAUTH_ALLOWED_SUBJECTS | 自己的稳定 sub，多个用户用逗号分隔；空白名单拒绝启动 |
+
+Scalekit token 的 aud 可以是字符串或数组；必须包含配置的 OAUTH_AUDIENCE。
+当 Scalekit 配置了 Server URL，aud 还可能同时包含 MCP URL。本项目不要求数组的顺序，
+但不会在 res_... 校验失败时退回只检查 URL，也不根据未验证 token 选择 issuer 或 JWKS。
+SDK 的 AccessToken.resource 只在 JWT audience 验证成功后映射为配置的 MCP_RESOURCE_URL，
+继续启用 validate_token_resource；这个映射不是跳过 JWT audience 检查。
+
+### OAuth 发现
+
+- /.well-known/oauth-protected-resource/mcp：SDK 提供的规范发现地址，401 的 WWW-Authenticate 指向这里。
+- /.well-known/oauth-protected-resource：兼容 Scalekit 指南的根地址，返回相同 JSON。
+- resource 为 MCP_RESOURCE_URL，authorization_servers 只包含配置的资源专属 issuer，
+  scopes_supported 为 mcp:tools，bearer_methods_supported 为 header。
+- 授权服务器元数据、authorize、token、客户端注册和刷新均由 Scalekit 提供；
+  本地不伪造 /.well-known/oauth-authorization-server 或注册端点。
+- 必须使用资源专属授权服务器发现信息；只使用环境级 OIDC 信息可能缺少 DCR 注册端点。
+
+官方资料：
+[Scalekit MCP Quickstart](https://docs.scalekit.com/authenticate/mcp/quickstart/)、
+[issuer 与 audience 排错](https://docs.scalekit.com/authenticate/mcp/troubleshooting/)、
+[资源专属发现和 JWKS](https://docs.scalekit.com/authenticate/mcp/xmcp-quickstart/)、
+[旧 issuer 迁移](https://docs.scalekit.com/authenticate/mcp/migrate-to-2026-07-28-mcp-spec/)。
 
 ## 认证架构
 
@@ -9,7 +61,8 @@
 选择支持 MCP/OAuth 2.1 的提供方，并配置：
 
 - HTTPS issuer，以及可发现的 OAuth 授权服务器元数据（含 authorization_endpoint、token_endpoint、PKCE S256）。
-- 为这个 MCP API 签发 RS256 access token（不是 ID token）；aud 必须包含完整的 MCP_RESOURCE_URL，scope 必须含 mcp:tools。
+- 为这个 MCP API 签发 RS256 access token（不是 ID token）；aud 必须包含 OAUTH_AUDIENCE，scope 必须含 mcp:tools。
+  未设置 OAUTH_AUDIENCE 时保留原行为，检查 MCP_RESOURCE_URL；显式空值属于配置错误。
 - token 必须有 iss、sub、iat、exp；只允许 OAUTH_ALLOWED_SUBJECTS 中列出的 sub 使用。
 - 如提供方支持 RFC 8707 resource 参数，将其映射为这个 API 的 audience；不要让用户手动传入另一个服务的 token。
 - 为 ChatGPT 注册 OAuth 客户端，回调 URL 使用 ChatGPT 创建连接时显示的值，严格匹配；
@@ -19,7 +72,7 @@
 
 JWKS 地址由管理员固定配置，不采信 token 中的 jku/x5u；只接受 RS256。
 缺少认证配置时 HTTP 启动失败。所有 /mcp 方法都需要 Bearer access token。
-发现端点 /.well-known/oauth-protected-resource/mcp 和 /healthz 可公开访问，不包含工具或密钥。
+两个资源发现端点和 /healthz 可公开访问，不包含工具或密钥。
 stdio 只适用于受信任的本地进程，不提供远程认证。
 
 ## Render
@@ -34,9 +87,10 @@ stdio 只适用于受信任的本地进程，不提供远程认证。
 | 环境变量 | 配置 |
 | --- | --- |
 | WINDY_API_KEY | 必填，Windy Webcams API key，Render secret |
-| MCP_RESOURCE_URL | 必填，例如 https://your-service.onrender.com/mcp，与 OAuth audience 一致，无尾部斜杠 |
+| MCP_RESOURCE_URL | 必填，例如 https://your-service.onrender.com/mcp，与 Scalekit Server URL 一致，无尾部斜杠 |
 | OAUTH_ISSUER_URL | 必填，提供方 issuer，精确匹配 token iss（包括尾部斜杠） |
 | OAUTH_JWKS_URL | 必填，提供方公开 HTTPS JWKS 地址 |
+| OAUTH_AUDIENCE | Scalekit 必填，当前 MCP 的 res_...；其他提供方省略时默认 MCP_RESOURCE_URL。Blueprint 要求填写时，其他提供方可明确填写 MCP URL |
 | OAUTH_ALLOWED_SUBJECTS | 必填，授权用户的稳定 sub，逗号分隔 |
 | HOST | 0.0.0.0，Blueprint 已设置 |
 | PORT | Render 自动提供，代码读取，不需要手动固定 |
@@ -48,7 +102,8 @@ GH_TOKEN 仅授予目标截图仓库 Contents 读写，不能复用部署凭据�
 天气无须 API key；不配置 Movebank/GitHub 只会使对应工具提示缺少配置。
 不要在代码、URL、命令行示例、工单或日志中粘贴真实密钥。
 不要开启 HTTP header/body 调试日志。Render 终止 HTTPS，应用绑定内部 HTTP 端口。
-域名变更时同步更新 resource/audience 与 ChatGPT 连接；不关闭 DNS rebinding 保护。
+域名变更时同步更新 MCP_RESOURCE_URL、Scalekit Server URL 和 ChatGPT 连接；
+仍使用同一 Scalekit MCP server 时 res_... 不变。不关闭 DNS rebinding 保护。
 
 ## ChatGPT
 
@@ -56,7 +111,8 @@ GH_TOKEN 仅授予目标截图仓库 Contents 读写，不能复用部署凭据�
 2. 在支持自定义 MCP 的 ChatGPT 工作区开启开发者模式，在 Apps/连接器中创建自定义 MCP 应用
    （入口名称取决于账户和工作区策略）。
 3. MCP URL 填 https://your-service.onrender.com/mcp，选择 OAuth，
-   按提供方配置填写客户端凭据（若界面提供），完成登录与授权。
+   根据 Scalekit 已开启的能力选择 CIMD/DCR，或使用同一资源下的预注册客户端，
+   完成登录与授权。不要填写 Scalekit 管理 API 的 client secret。
 4. 使用 OAUTH_ALLOWED_SUBJECTS 中的用户登录；验证能列出 12 个工具，尝试 weather_at，
    然后测试摄像头及已配置的 Movebank 工具。
 
@@ -68,7 +124,9 @@ ChatGPT 自定义 MCP 连接不等同于旧式插件 manifest 或 GPT Actions Op
 
 运行 python -m pip install -r requirements.txt pytest pytest-asyncio，
 再运行 python -m pytest -q；CI 使用同样步骤，无真实服务凭据。
-测试覆盖 JWT 校验、拒绝匿名访问、scope、MCP 初始化、发现端点和原工具注册。
+测试覆盖 Scalekit 形式的签名 JWT、真实 JWKS 解析与缓存、issuer/audience、
+拒绝匿名或非白名单用户、scope、MCP 初始化、两种发现端点及认证后工具调用。
+测试只 mock JWKS HTTP 响应，不绕过这些集成测试中的 JWT 验证器。
 第三方 API 通过 mock 回归；真实 Windy/Movebank/GitHub、Render TLS 与 ChatGPT OAuth
 仍需在配置账户后做端到端验收。
 
