@@ -155,6 +155,13 @@ ChatGPT 自定义 MCP 连接不等同于旧式插件 manifest 或 GPT Actions Op
 
 ## 验证与运维
 
+完整链路的已验证结果、未验证边界及后续验收见 [INTEGRATION_AUDIT.md](INTEGRATION_AUDIT.md)。
+新增 `mcp_http` 日志只记录请求 ID、状态码和固定认证结果分类，不记录令牌或用户声明。
+401 时可据此区分缺少 Bearer、issuer/audience 不符、白名单拒绝和 JWKS 故障；
+403 时区分 scope 不足与已验签后的传输拒绝。Origin 白名单仍不放宽。
+`/healthz` 在 Render 自动提供合法 `RENDER_GIT_COMMIT` 时返回 `revision`，无需新增 secret。
+授权失败的详细分类仅用于服务端诊断，不会返回给未授权客户端。
+
 运行 python -m pip install -r requirements.txt pytest pytest-asyncio，
 再运行 python -m pytest -q；CI 使用同样步骤，无真实服务凭据。
 测试覆盖 Scalekit 形式的签名 JWT、真实 JWKS 解析与缓存、issuer/audience、
