@@ -20,5 +20,7 @@ services:
         sync: false
       - key: OAUTH_JWKS_URL
         sync: false
+      - key: OAUTH_AUDIENCE
+        sync: false
       - key: OAUTH_ALLOWED_SUBJECTS
         sync: false

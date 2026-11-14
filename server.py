@@ -8,7 +8,7 @@ import datetime as dt
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 from starlette.responses import JSONResponse
-from security import remote_security
+from security import remote_security, register_discovery_alias
 
 API_KEY = os.environ["WINDY_API_KEY"]
 BASE = "https://api.windy.com/webcams/api/v3"
@@ -27,6 +27,8 @@ mcp = FastMCP(
     stateless_http=True,
     **(remote_security() if TRANSPORT != "stdio" else {}),
 )
+
+register_discovery_alias(mcp)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

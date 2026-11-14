@@ -71,6 +71,10 @@ venv/bin/python server.py
 
 远程 HTTP 默认强制 OAuth，启动前请按 [Render 与 ChatGPT 部署说明](DEPLOYMENT.md) 配置认证。保留真实 Host 头；只允许配置的服务域名和 Origin，不要清除 Origin 绕过校验。
 
+使用 Scalekit 时，令牌 audience 配置为该 MCP server 的 Resource ID（OAUTH_AUDIENCE=res_...），
+issuer 配置为环境 URL 后接 /resources/res_...，JWKS 通常为环境域名的 /keys。
+MCP_RESOURCE_URL 仍填写公开的 /mcp URL；具体配置与用户 sub 白名单见部署说明。
+
 ### 接到 Claude 上 / Connect to Claude
 
 **Claude Desktop**（本地运行，不需要服务器）：打开 Settings → Developer → Edit Config，在 `claude_desktop_config.json` 里加：
