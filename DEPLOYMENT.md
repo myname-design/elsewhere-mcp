@@ -80,9 +80,42 @@ stdio 只适用于受信任的本地进程，不提供远程认证。
 从本 PR 分支创建 Blueprint（render.yaml），或创建 Python Web Service：
 
 - Build: pip install -r requirements.txt
-- Start: python server.py
+- Start: uvicorn asgi:app --host ${HOST:-0.0.0.0} --port ${PORT:-8787}
 - Health check: /healthz
 - 单进程运行，使用 stateless HTTP，避免跨请求会话依赖和重启丢失会话。
+
+asgi:app 是明确的生产入口：先完成 server.py 中所有工具及自定义路由注册，再通过
+create_http_app() 导出整个 Starlette 应用。该应用自带 MCP session manager lifespan，
+必须挂在根路径 /；不要再将它 Mount 到 /mcp，否则会产生 /mcp/mcp 及错误的发现路径。
+/mcp 是应用内部的 MCP 路由，不是整个应用的挂载前缀。
+
+python server.py 仍受支持，HTTP 模式也通过同一个 create_http_app() 工厂运行；
+TRANSPORT=stdio 继续用于本地客户端，不能通过 ASGI 工厂暴露成未认证的 HTTP。
+不要启动低层 streamable_http handler 代替完整应用，它不包含健康检查和发现路由。
+
+已存在的 Render 服务不一定自动应用仓库中的 render.yaml：
+后续获准部署时，应在 Render Settings 核对 Start Command、Health Check Path=/healthz、
+服务根目录、分支和部署提交。仅修改仓库配置不等于修改现有服务设置。
+
+### 404 排查：应用路由与 Render 路由层
+
+未登录时应得到以下响应（不需要在 URL 或请求头中放密钥）：
+
+| 请求 | 期望响应 |
+| --- | --- |
+| GET /healthz | 200，JSON status=ok |
+| GET /.well-known/oauth-protected-resource/mcp | 200，resource、authorization_servers、scopes_supported |
+| GET /.well-known/oauth-protected-resource | 200，与上面的元数据一致 |
+| GET /mcp | 401，WWW-Authenticate 包含规范元数据地址 |
+
+可用 curl -i https://你的服务.onrender.com/healthz 查看状态和响应头。
+如果出现 x-render-routing: no-server，先排查 Render 后端路由/服务关联，而不是绕过认证：
+核对 Dashboard 的真实 Service URL、服务是否运行或暂停、最新部署状态、
+Uvicorn 是否在 Render 提供的 PORT 上监听，以及请求是否出现在应用访问日志中。
+记录响应头中的请求/路由信息、请求时间和部署提交，必要时联系 Render 支持。
+这个响应头不能单独证明是哪项 Render 设置错误，ASGI 代码改动也不能保证修复该路由层状态。
+如果部署显示 Live 但 /healthz 仍是 404，核对实际服务是否设置了上述健康检查路径。
+应用内 404 则应核对实际运行入口和挂载前缀。不要用公开未认证的 /mcp 来掩盖发现失败。
 
 | 环境变量 | 配置 |
 | --- | --- |
@@ -127,6 +160,9 @@ ChatGPT 自定义 MCP 连接不等同于旧式插件 manifest 或 GPT Actions Op
 测试覆盖 Scalekit 形式的签名 JWT、真实 JWKS 解析与缓存、issuer/audience、
 拒绝匿名或非白名单用户、scope、MCP 初始化、两种发现端点及认证后工具调用。
 测试只 mock JWKS HTTP 响应，不绕过这些集成测试中的 JWT 验证器。
+路由回归还直接导入 asgi:app，通过应用自身的 lifespan 发送真实 ASGI 请求，
+并在独立 Python 进程中启动 python server.py 和 uvicorn asgi:app，
+验证真实监听端口上的健康、发现与 401 响应，避免只测路由函数或另一套测试专用应用。
 第三方 API 通过 mock 回归；真实 Windy/Movebank/GitHub、Render TLS 与 ChatGPT OAuth
 仍需在配置账户后做端到端验收。
 

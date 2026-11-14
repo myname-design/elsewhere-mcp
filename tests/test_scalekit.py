@@ -5,7 +5,12 @@ Only the outbound JWKS HTTP response is mocked; no real credentials are used.
 import importlib
 import io
 import json
+import os
+import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import httpx
 import jwt
@@ -141,9 +146,14 @@ async def test_authenticated_http_discovery_and_tools(scalekit):
     token, _ = scalekit
     import server
     server = importlib.reload(server)
-    app = server.mcp.streamable_http_app()
-    async with server.mcp.session_manager.run():
+    # Exercise the actual Render import target, including its own lifespan.
+    import asgi
+    app = importlib.reload(asgi).app
+    async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://example.onrender.com") as client:
+            health = await client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok"}
             canonical = await client.get("/.well-known/oauth-protected-resource/mcp")
             root = await client.get("/.well-known/oauth-protected-resource")
             assert root.status_code == canonical.status_code == 200
@@ -152,6 +162,7 @@ async def test_authenticated_http_discovery_and_tools(scalekit):
             assert root.json()["authorization_servers"] == [ISSUER]
             assert root.json()["scopes_supported"] == ["mcp:tools"]
             assert root.json()["bearer_methods_supported"] == ["header"]
+            assert canonical.history == root.history == health.history == []
             assert (await client.options("/.well-known/oauth-protected-resource")).status_code == 204
             # We are a resource server, not a second/partially implemented AS.
             assert (await client.get("/.well-known/oauth-authorization-server")).status_code == 404
@@ -177,7 +188,9 @@ async def test_authenticated_http_discovery_and_tools(scalekit):
             assert initialized.status_code == 200 and "serverInfo" in initialized.text
             listed = await rpc("tools/list", {}, token())
             assert listed.status_code == 200
-            assert all(tool.name in listed.text for tool in await server.mcp.list_tools())
+            tools = await server.mcp.list_tools()
+            assert len(tools) == 12
+            assert all(tool.name in listed.text for tool in tools)
             server._om_cache[(35, 139)] = (time.time(), {
                 "current": {"temperature_2m": 20}, "timezone": "Asia/Tokyo",
             })
@@ -187,3 +200,95 @@ async def test_authenticated_http_discovery_and_tools(scalekit):
                 rejected = await client.post("/mcp", headers=base_headers | header | {
                     "Authorization": "Bearer " + token()}, json={})
                 assert rejected.status_code in (403, 421)
+
+
+@pytest.mark.asyncio
+async def test_python_entrypoint_serves_complete_root_router(scalekit, monkeypatch):
+    import server
+    import uvicorn
+    server = importlib.reload(server)
+    captured = {}
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("PORT", "10000")
+    server = importlib.reload(server)
+
+    def capture_run(app, **kwargs):
+        captured.update(app=app, **kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", capture_run)
+    server.main()
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 10000
+    app = captured["app"]
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://example.onrender.com") as client:
+            assert (await client.get("/healthz")).status_code == 200
+            response = await client.get("/mcp")
+            assert response.status_code == 401
+            # Follow the actual advertised discovery URL, rather than assume a path.
+            import re
+            metadata_url = re.search(r'resource_metadata="([^"]+)"', response.headers["www-authenticate"])[1]
+            metadata = await client.get(metadata_url)
+            assert metadata.status_code == 200
+            assert metadata.json()["authorization_servers"] == [ISSUER]
+            # The app must not have been mounted a second time under /mcp.
+            assert (await client.get("/mcp/mcp")).status_code == 404
+            assert (await client.get("/mcp/healthz")).status_code == 404
+
+
+def test_stdio_cannot_be_exposed_as_unauthenticated_http(scalekit, monkeypatch):
+    import server
+    monkeypatch.setenv("TRANSPORT", "stdio")
+    server = importlib.reload(server)
+    with pytest.raises(RuntimeError, match="TRANSPORT=streamable-http"):
+        server.create_http_app()
+    calls = []
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: calls.append(kwargs))
+    server.main()
+    assert calls == [{"transport": "stdio"}]
+
+
+@pytest.mark.parametrize("entrypoint", ["script", "uvicorn"])
+def test_running_production_entrypoints(scalekit, entrypoint):
+    # Exercise a real listener and ASGI lifespan in a fresh interpreter.
+    # No tokens are sent, so no JWKS/third-party network calls are needed.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    env = dict(os.environ, HOST="127.0.0.1", PORT=str(port),
+               GH_TOKEN="", GH_REPO="", MOVEBANK_USER_B64="", MOVEBANK_PASS_B64="")
+    command = [sys.executable, "server.py"] if entrypoint == "script" else [
+        sys.executable, "-m", "uvicorn", "asgi:app",
+        "--host", "127.0.0.1", "--port", str(port),
+    ]
+    process = subprocess.Popen(command, cwd=Path(__file__).resolve().parents[1], env=env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=1, trust_env=False) as client:
+            deadline = time.monotonic() + 15
+            while True:
+                assert process.poll() is None, "HTTP process exited before becoming ready"
+                try:
+                    health = client.get("/healthz")
+                    break
+                except httpx.TransportError:
+                    assert time.monotonic() < deadline, "HTTP process did not become ready"
+                    time.sleep(0.05)
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok"}
+            for path in ("/.well-known/oauth-protected-resource",
+                         "/.well-known/oauth-protected-resource/mcp"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json()["authorization_servers"] == [ISSUER]
+                assert response.json()["resource"] == RESOURCE
+            challenge = client.get("/mcp")
+            assert challenge.status_code == 401
+            assert "resource_metadata=" in challenge.headers["www-authenticate"]
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
